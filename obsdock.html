@@ -58,7 +58,7 @@
     <button onclick="updateTwitch()" style="background: #772ce8; padding: 10px; font-size: 14px;">UPDATE TWITCH</button>
 
     <footer>
-        <a onclick="window.open('https://ko-fi.com/sephrok')">Created by Sephrok the Pathfinder</a>
+        Created by Sephrok the Pathfinder <a onclick="window.open('https://ko-fi.com/sephrok')">Buy me a coffee!</a> 
     </footer>
 
     <!-- Auth Popup Overlay -->
@@ -73,7 +73,7 @@
     </div>
 
     <script>
-        const CLIENT_ID = 'YOUR_CLIENT_ID'; // Replace with your Public Client ID
+        const CLIENT_ID = 'b5rzfq5x5to3uoxekmkb7ib3t2jgsc'; // Replace with your Public Client ID
         let db = JSON.parse(localStorage.getItem('twitch_manager_db')) || { accounts: {}, active: null, presets: {} };
 
         function saveDB() {
