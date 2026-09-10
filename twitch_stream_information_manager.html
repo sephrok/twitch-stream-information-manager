@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Twitch Stream Manager</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #1e1e1e; color: #fff; padding: 12px; margin: 0; font-size: 13px; }
+        fieldset { border: 1px solid #444; border-radius: 4px; padding: 10px; margin-bottom: 10px; }
+        legend { color: #9146ff; font-weight: bold; }
+        select, input, button { width: 100%; padding: 6px; margin-top: 4px; margin-bottom: 8px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 4px; box-sizing: border-box; }
+        button { background: #772ce8; font-weight: bold; cursor: pointer; }
+        button:hover { background: #9146ff; }
+        button.danger { background: #a82020; }
+        button.danger:hover { background: #c53030; }
+        .row { display: flex; gap: 5px; }
+        .row button { width: auto; flex: 1; }
+        #auth-modal { display: none; background: rgba(0,0,0,0.8); position: fixed; top:0; left:0; width:100%; height:100%; padding: 20px; box-sizing: border-box; text-align: center; }
+        footer { text-align: center; margin-top: 10px; }
+        footer a { color: #3b82f6; text-decoration: underline; cursor: pointer; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <fieldset>
+        <legend>Twitch Account</legend>
+        <div class="row">
+            <select id="accountSelect" onchange="switchAccount()"></select>
+            <button onclick="startAuth()" style="width: 50px;">Add</button>
+            <button class="danger" onclick="logoutAccount()" style="width: 60px;">Logout</button>
+        </div>
+    </fieldset>
+
+    <fieldset>
+        <legend>Stream Information</legend>
+        <label>Select Preset:</label>
+        <select id="presetSelect" onchange="loadPreset()">
+            <option value="">New Preset</option>
+        </select>
+
+        <label>Stream Title:</label>
+        <input type="text" id="titleInput">
+
+        <label>Game Name:</label>
+        <input type="text" id="gameInput">
+
+        <label>Tags (comma-separated, max 10):</label>
+        <input type="text" id="tagsInput">
+
+        <label>Save Preset As:</label>
+        <input type="text" id="presetNameInput">
+
+        <div class="row">
+            <button onclick="savePreset()">Save Preset</button>
+            <button class="danger" onclick="deletePreset()">Delete</button>
+        </div>
+    </fieldset>
+
+    <button onclick="updateTwitch()" style="background: #772ce8; padding: 10px; font-size: 14px;">UPDATE TWITCH</button>
+
+    <footer>
+        <a onclick="window.open('https://ko-fi.com/sephrok')">Created by Sephrok the Pathfinder</a>
+    </footer>
+
+    <!-- Auth Popup Overlay -->
+    <div id="auth-modal">
+        <h3>Twitch Authorization</h3>
+        <p>1. Copy code:</p>
+        <input type="text" id="userCodeDisplay" readonly style="text-align:center; font-size:16px; font-weight:bold;">
+        <p>2. Authorize at link:</p>
+        <a id="verificationLink" href="#" target="_blank" style="color:#3b82f6; word-break:break-all;"></a>
+        <p style="color:#aaa; margin-top:15px;" id="authStatus">Waiting for authorization...</p>
+        <button onclick="closeAuthModal()" class="danger" style="margin-top:10px;">Cancel</button>
+    </div>
+
+    <script>
+        const CLIENT_ID = 'YOUR_CLIENT_ID'; // Replace with your Public Client ID
+        let db = JSON.parse(localStorage.getItem('twitch_manager_db')) || { accounts: {}, active: null, presets: {} };
+
+        function saveDB() {
+            localStorage.setItem('twitch_manager_db', JSON.stringify(db));
+        }
+
+        function initUI() {
+            // Accounts
+            const accSelect = document.getElementById('accountSelect');
+            accSelect.innerHTML = '';
+            const accNames = Object.keys(db.accounts);
+            if (accNames.length === 0) {
+                accSelect.innerHTML = '<option value="">No accounts logged in</option>';
+            } else {
+                accNames.forEach(name => {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    if (name === db.active) opt.selected = true;
+                    accSelect.appendChild(opt);
+                });
+            }
+
+            // Presets
+            const pSelect = document.getElementById('presetSelect');
+            pSelect.innerHTML = '<option value="">New Preset</option>';
+            Object.keys(db.presets).forEach(pName => {
+                const opt = document.createElement('option');
+                opt.value = pName;
+                opt.textContent = pName;
+                pSelect.appendChild(opt);
+            });
+        }
+
+        function switchAccount() {
+            db.active = document.getElementById('accountSelect').value;
+            saveDB();
+        }
+
+        function logoutAccount() {
+            if (db.active && db.accounts[db.active]) {
+                delete db.accounts[db.active];
+                db.active = Object.keys(db.accounts)[0] || null;
+                saveDB();
+                initUI();
+                alert('Logged out successfully.');
+            }
+        }
+
+        async function startAuth() {
+            try {
+                const res = await fetch('https://id.twitch.tv/oauth2/device', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `client_id=${CLIENT_ID}&scopes=channel:manage:broadcast`
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    document.getElementById('userCodeDisplay').value = data.user_code;
+                    const link = document.getElementById('verificationLink');
+                    link.href = data.verification_uri;
+                    link.textContent = data.verification_uri;
+                    document.getElementById('auth-modal').style.display = 'block';
+                    pollToken(data.device_code, data.interval);
+                } else {
+                    alert('Failed to start authentication.');
+                }
+            } catch (err) {
+                alert('Connection error: ' + err.message);
+            }
+        }
+
+        let pollInterval = null;
+        async function pollToken(deviceCode, interval) {
+            clearInterval(pollInterval);
+            pollInterval = setInterval(async () => {
+                try {
+                    const res = await fetch('https://id.twitch.tv/oauth2/token', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: `client_id=${CLIENT_ID}&scopes=channel:manage:broadcast&device_code=${deviceCode}&grant_type=urn:ietf:params:oauth:grant-type:device_code`
+                    });
+                    const data = await res.json();
+                    if (res.ok) {
+                        clearInterval(pollInterval);
+                        document.getElementById('auth-modal').style.display = 'none';
+                        fetchUserInfo(data.access_token);
+                    } else if (data.message !== 'authorization_pending') {
+                        clearInterval(pollInterval);
+                    }
+                } catch (e) {}
+            }, interval * 1000);
+        }
+
+        function closeAuthModal() {
+            clearInterval(pollInterval);
+            document.getElementById('auth-modal').style.display = 'none';
+        }
+
+        async function fetchUserInfo(token) {
+            const res = await fetch('https://api.twitch.tv/helix/users', {
+                headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${token}` }
+            });
+            const data = await res.json();
+            if (res.ok && data.data.length > 0) {
+                const user = data.data[0];
+                db.accounts[user.display_name] = { access_token: token, broadcaster_id: user.id };
+                db.active = user.display_name;
+                saveDB();
+                initUI();
+                alert(`Successfully logged in as ${user.display_name}!`);
+            }
+        }
+
+        function loadPreset() {
+            const name = document.getElementById('presetSelect').value;
+            if (name && db.presets[name]) {
+                const p = db.presets[name];
+                document.getElementById('titleInput').value = p.title || '';
+                document.getElementById('gameInput').value = p.game || '';
+                document.getElementById('tagsInput').value = (p.tags || []).join(', ');
+                document.getElementById('presetNameInput').value = name;
+            } else {
+                document.getElementById('titleInput').value = '';
+                document.getElementById('gameInput').value = '';
+                document.getElementById('tagsInput').value = '';
+                document.getElementById('presetNameInput').value = '';
+            }
+        }
+
+        function savePreset() {
+            const name = document.getElementById('presetNameInput').value.trim();
+            if (!name) {
+                alert('Please enter a preset name.');
+                return;
+            }
+            const title = document.getElementById('titleInput').value.trim();
+            const game = document.getElementById('gameInput').value.trim();
+            const tags = document.getElementById('tagsInput').value.split(',').map(t => t.trim()).filter(t => t).slice(0, 10);
+
+            db.presets[name] = { title, game, tags };
+            saveDB();
+            initUI();
+            document.getElementById('presetSelect').value = name;
+            alert(`Preset '${name}' saved!`);
+        }
+
+        function deletePreset() {
+            const name = document.getElementById('presetSelect').value;
+            if (!name || !db.presets[name]) return;
+            if (confirm(`Delete preset '${name}'?`)) {
+                delete db.presets[name];
+                saveDB();
+                initUI();
+                loadPreset();
+            }
+        }
+
+        async function updateTwitch() {
+            if (!db.active || !db.accounts[db.active]) {
+                alert('Please select or log into a Twitch account first.');
+                return;
+            }
+            const acc = db.accounts[db.active];
+            const title = document.getElementById('titleInput').value.trim();
+            const gameName = document.getElementById('gameInput').value.trim();
+            const tags = document.getElementById('tagsInput').value.split(',').map(t => t.trim()).filter(t => t).slice(0, 10);
+
+            let gameId = "";
+            if (gameName) {
+                const gameRes = await fetch(`https://api.twitch.tv/helix/games?name=${encodeURIComponent(gameName)}`, {
+                    headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${acc.access_token}` }
+                });
+                const gameData = await gameRes.json();
+                if (gameRes.ok && gameData.data.length > 0) {
+                    gameId = gameData.data[0].id;
+                }
+            }
+
+            const res = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${acc.broadcaster_id}`, {
+                method: 'PATCH',
+                headers: {
+                    'Client-ID': CLIENT_ID,
+                    'Authorization': `Bearer ${acc.access_token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ title, game_id: gameId, tags })
+            });
+
+            if (res.status === 204) {
+                alert('Stream updated successfully!');
+            } else {
+                const errText = await res.text();
+                alert(`Update failed: ${errText}`);
+            }
+        }
+
+        initUI();
+    </script>
+</body>
+</html>
