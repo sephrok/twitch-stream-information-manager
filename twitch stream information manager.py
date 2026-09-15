@@ -7,15 +7,15 @@ import os
 import webbrowser
 import threading
 
-CLIENT_ID = 'b5rzfq5x5to3uoxekmkb7ib3t2jgsc' # Ensure your Public Client ID is pasted here
+CLIENT_ID = 'YOUR_CLIENT_ID' # Ensure your Public Client ID is pasted here
 CONFIG_FILE = 'config.json'
 PRESETS_FILE = 'presets.json'
 
 class TwitchStreamManager:
     def __init__(self, root):
         self.root = root
-        self.root.title("Twitch Stream Information Manager v0.2")
-        self.root.geometry("450x620")
+        self.root.title("Twitch Stream Information Manager v0.3")
+        self.root.geometry("450x600")
         
         self.config = self.load_json(CONFIG_FILE)
         if "accounts" not in self.config:
@@ -166,7 +166,8 @@ class TwitchStreamManager:
         }
         response = requests.post(url, data=data)
         if response.status_code == 200:
-            self.fetch_user_info(response.json()['access_token'])
+            res_json = response.json()
+            self.fetch_user_info(res_json['access_token'], res_json.get('refresh_token'))
             self.auth_popup.destroy()
         elif response.status_code == 400:
             self.root.after(self.interval * 1000, self.poll_for_token)
@@ -174,7 +175,7 @@ class TwitchStreamManager:
             self.auth_popup.destroy()
             messagebox.showerror("Error", "Authentication failed or timed out.")
 
-    def fetch_user_info(self, access_token):
+    def fetch_user_info(self, access_token, refresh_token):
         url = "https://api.twitch.tv/helix/users"
         headers = {'Client-ID': CLIENT_ID, 'Authorization': f'Bearer {access_token}'}
         response = requests.get(url, headers=headers)
@@ -184,12 +185,64 @@ class TwitchStreamManager:
                 display_name = data[0]['display_name']
                 self.config["accounts"][display_name] = {
                     'access_token': access_token,
+                    'refresh_token': refresh_token,
                     'broadcaster_id': data[0]['id']
                 }
                 self.config["active"] = display_name
                 self.save_json(CONFIG_FILE, self.config)
                 self.refresh_account_dropdown()
                 messagebox.showinfo("Success", f"Logged in as {display_name}!")
+
+    # --- AUTOMATIC TOKEN REFRESH LOGIC ---
+    def refresh_access_token(self, account_name):
+        acc = self.config["accounts"].get(account_name)
+        if not acc or not acc.get('refresh_token'):
+            return False
+        
+        url = "https://id.twitch.tv/oauth2/token"
+        data = {
+            "client_id": CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": acc['refresh_token']
+        }
+        try:
+            response = requests.post(url, data=data)
+            if response.status_code == 200:
+                res_json = response.json()
+                acc['access_token'] = res_json['access_token']
+                if 'refresh_token' in res_json:
+                    acc['refresh_token'] = res_json['refresh_token']
+                self.save_json(CONFIG_FILE, self.config)
+                return True
+        except:
+            pass
+        return False
+
+    def api_request_with_retry(self, method, url, headers=None, json_data=None):
+        active_account = self.config.get("active")
+        if not active_account:
+            return None
+        
+        acc = self.config["accounts"][active_account]
+        if headers is None:
+            headers = {}
+        
+        headers['Client-ID'] = CLIENT_ID
+        headers['Authorization'] = f"Bearer {acc['access_token']}"
+
+        # First attempt
+        response = requests.request(method, url, headers=headers, json=json_data)
+
+        # If unauthorized (token expired), refresh and retry once
+        if response.status_code == 401:
+            if self.refresh_access_token(active_account):
+                acc = self.config["accounts"][active_account]
+                headers['Authorization'] = f"Bearer {acc['access_token']}"
+                response = requests.request(method, url, headers=headers, json=json_data)
+            else:
+                self.root.after(0, lambda: messagebox.showerror("Session Expired", "Could not refresh login token. Please log out and add your account again."))
+        
+        return response
 
     # --- PRESET LOGIC ---
     def refresh_preset_dropdown(self):
@@ -221,7 +274,6 @@ class TwitchStreamManager:
             messagebox.showwarning("Error", "Please provide a Preset Name.")
             return
 
-        # Format tags into a list, stripping whitespace, limited to 10
         tags_list = [t.strip() for t in tags_raw.split(',') if t.strip()][:10]
 
         self.presets[name] = {"title": title, "game": game, "tags": tags_list}
@@ -241,7 +293,7 @@ class TwitchStreamManager:
             self.refresh_preset_dropdown()
             self.clear_fields()
 
-    # --- TWITCH API UPDATES (THREADED) ---
+    # --- TWITCH API UPDATES (THREADED WITH REFRESH SUPPORT) ---
     def update_twitch(self):
         active_account = self.config.get("active")
         if not active_account or active_account not in self.config.get("accounts", {}):
@@ -253,35 +305,28 @@ class TwitchStreamManager:
         tags_raw = self.tags_entry.get().strip()
         tags_list = [t.strip() for t in tags_raw.split(',') if t.strip()][:10]
 
-        account_data = self.config["accounts"][active_account]
-        
-        # Start the background thread so the UI doesn't freeze
-        threading.Thread(target=self.background_update_task, args=(account_data, title, game_name, tags_list), daemon=True).start()
+        threading.Thread(target=self.background_update_task, args=(title, game_name, tags_list), daemon=True).start()
 
-    def background_update_task(self, account_data, title, game_name, tags_list):
-        headers = {
-            'Client-ID': CLIENT_ID,
-            'Authorization': f"Bearer {account_data['access_token']}",
-            'Content-Type': 'application/json'
-        }
-
+    def background_update_task(self, title, game_name, tags_list):
         game_id = ""
         if game_name:
             try:
-                game_res = requests.get(f"https://api.twitch.tv/helix/games?name={game_name}", headers=headers)
-                if game_res.status_code == 200 and game_res.json().get('data'):
+                game_res = self.api_request_with_retry('GET', f"https://api.twitch.tv/helix/games?name={game_name}")
+                if game_res and game_res.status_code == 200 and game_res.json().get('data'):
                     game_id = game_res.json()['data'][0]['id']
             except:
-                pass # Game search failed, proceed with empty game ID
+                pass
 
         payload = {"title": title, "game_id": game_id, "tags": tags_list}
-        url = f"https://api.twitch.tv/helix/channels?broadcaster_id={account_data['broadcaster_id']}"
+        active_account = self.config.get("active")
+        broadcaster_id = self.config["accounts"][active_account]['broadcaster_id']
+        url = f"https://api.twitch.tv/helix/channels?broadcaster_id={broadcaster_id}"
         
         try:
-            response = requests.patch(url, headers=headers, json=payload)
-            if response.status_code == 204:
+            response = self.api_request_with_retry('PATCH', url, headers={'Content-Type': 'application/json'}, json_data=payload)
+            if response and response.status_code == 204:
                 self.root.after(0, lambda: messagebox.showinfo("Success", "Stream updated!"))
-            else:
+            elif response:
                 self.root.after(0, lambda: messagebox.showerror("Error", f"Update failed: {response.status_code}\n{response.text}"))
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to connect to Twitch: {e}"))
