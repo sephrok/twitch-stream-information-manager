@@ -8,7 +8,7 @@
         fieldset { border: 1px solid #444; border-radius: 4px; padding: 10px; margin-bottom: 10px; }
         legend { color: #9146ff; font-weight: bold; }
         select, input, button { width: 100%; padding: 6px; margin-top: 4px; margin-bottom: 8px; background: #2d2d2d; color: #fff; border: 1px solid #444; border-radius: 4px; box-sizing: border-box; }
-        button { background: #772ce8; font-weight: bold; cursor: pointer; }
+        button { background: #772ce8; font-weight: bold; cursor: pointer; border: none; }
         button:hover { background: #9146ff; }
         button.danger { background: #a82020; }
         button.danger:hover { background: #c53030; }
@@ -58,7 +58,7 @@
     <button onclick="updateTwitch()" style="background: #772ce8; padding: 10px; font-size: 14px;">UPDATE TWITCH</button>
 
     <footer>
-        Created by Sephrok the Pathfinder <a onclick="window.open('https://ko-fi.com/sephrok')">Buy me a coffee!</a> 
+        <a onclick="window.open('https://ko-fi.com/sephrok')">Created by Sephrok the Pathfinder</a>
     </footer>
 
     <!-- Auth Popup Overlay -->
@@ -73,15 +73,15 @@
     </div>
 
     <script>
-        const CLIENT_ID = 'b5rzfq5x5to3uoxekmkb7ib3t2jgsc'; // Replace with your Public Client ID
+        const CLIENT_ID = 'YOUR_CLIENT_ID'; // Ensure your Client ID is here before uploading
         let db = JSON.parse(localStorage.getItem('twitch_manager_db')) || { accounts: {}, active: null, presets: {} };
 
         function saveDB() {
             localStorage.setItem('twitch_manager_db', JSON.stringify(db));
         }
 
+        // --- UI INITIALIZATION ---
         function initUI() {
-            // Accounts
             const accSelect = document.getElementById('accountSelect');
             accSelect.innerHTML = '';
             const accNames = Object.keys(db.accounts);
@@ -97,7 +97,6 @@
                 });
             }
 
-            // Presets
             const pSelect = document.getElementById('presetSelect');
             pSelect.innerHTML = '<option value="">New Preset</option>';
             Object.keys(db.presets).forEach(pName => {
@@ -108,6 +107,7 @@
             });
         }
 
+        // --- ACCOUNT MANAGEMENT ---
         function switchAccount() {
             db.active = document.getElementById('accountSelect').value;
             saveDB();
@@ -123,6 +123,7 @@
             }
         }
 
+        // --- AUTHENTICATION (DEVICE CODE) ---
         async function startAuth() {
             try {
                 const res = await fetch('https://id.twitch.tv/oauth2/device', {
@@ -160,7 +161,8 @@
                     if (res.ok) {
                         clearInterval(pollInterval);
                         document.getElementById('auth-modal').style.display = 'none';
-                        fetchUserInfo(data.access_token);
+                        // Capture both the access token and the refresh token
+                        fetchUserInfo(data.access_token, data.refresh_token);
                     } else if (data.message !== 'authorization_pending') {
                         clearInterval(pollInterval);
                     }
@@ -173,14 +175,18 @@
             document.getElementById('auth-modal').style.display = 'none';
         }
 
-        async function fetchUserInfo(token) {
+        async function fetchUserInfo(token, refreshToken) {
             const res = await fetch('https://api.twitch.tv/helix/users', {
                 headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${token}` }
             });
             const data = await res.json();
             if (res.ok && data.data.length > 0) {
                 const user = data.data[0];
-                db.accounts[user.display_name] = { access_token: token, broadcaster_id: user.id };
+                db.accounts[user.display_name] = { 
+                    access_token: token, 
+                    refresh_token: refreshToken, 
+                    broadcaster_id: user.id 
+                };
                 db.active = user.display_name;
                 saveDB();
                 initUI();
@@ -188,6 +194,55 @@
             }
         }
 
+        // --- SILENT TOKEN REFRESH LOGIC ---
+        async function refreshAccessToken(accountName) {
+            const acc = db.accounts[accountName];
+            if (!acc || !acc.refresh_token) return false;
+
+            try {
+                const res = await fetch('https://id.twitch.tv/oauth2/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: `client_id=${CLIENT_ID}&grant_type=refresh_token&refresh_token=${encodeURIComponent(acc.refresh_token)}`
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    acc.access_token = data.access_token;
+                    // Twitch might return a new refresh token, if so, update it
+                    if (data.refresh_token) acc.refresh_token = data.refresh_token; 
+                    saveDB();
+                    return true;
+                }
+            } catch (e) {}
+            return false;
+        }
+
+        // Wrapper function to automatically retry API calls if the token is expired (401 Error)
+        async function apiFetchWithRetry(url, options) {
+            if (!db.active || !db.accounts[db.active]) return null;
+            let acc = db.accounts[db.active];
+
+            options.headers = options.headers || {};
+            options.headers['Client-ID'] = CLIENT_ID;
+            options.headers['Authorization'] = `Bearer ${acc.access_token}`;
+
+            let res = await fetch(url, options);
+
+            if (res.status === 401) {
+                // Token is likely expired, attempt a background refresh
+                const refreshed = await refreshAccessToken(db.active);
+                if (refreshed) {
+                    acc = db.accounts[db.active];
+                    options.headers['Authorization'] = `Bearer ${acc.access_token}`;
+                    res = await fetch(url, options); // Retry original request
+                } else {
+                    alert('Session expired and could not be restored. Please Logout and Add your account again.');
+                }
+            }
+            return res;
+        }
+
+        // --- PRESET LOGIC ---
         function loadPreset() {
             const name = document.getElementById('presetSelect').value;
             if (name && db.presets[name]) {
@@ -232,40 +287,36 @@
             }
         }
 
+        // --- TWITCH API UPDATES ---
         async function updateTwitch() {
             if (!db.active || !db.accounts[db.active]) {
                 alert('Please select or log into a Twitch account first.');
                 return;
             }
-            const acc = db.accounts[db.active];
+            
             const title = document.getElementById('titleInput').value.trim();
             const gameName = document.getElementById('gameInput').value.trim();
             const tags = document.getElementById('tagsInput').value.split(',').map(t => t.trim()).filter(t => t).slice(0, 10);
-
             let gameId = "";
+
             if (gameName) {
-                const gameRes = await fetch(`https://api.twitch.tv/helix/games?name=${encodeURIComponent(gameName)}`, {
-                    headers: { 'Client-ID': CLIENT_ID, 'Authorization': `Bearer ${acc.access_token}` }
-                });
-                const gameData = await gameRes.json();
-                if (gameRes.ok && gameData.data.length > 0) {
-                    gameId = gameData.data[0].id;
+                const gameRes = await apiFetchWithRetry(`https://api.twitch.tv/helix/games?name=${encodeURIComponent(gameName)}`, { method: 'GET' });
+                if (gameRes && gameRes.ok) {
+                    const gameData = await gameRes.json();
+                    if (gameData.data && gameData.data.length > 0) gameId = gameData.data[0].id;
                 }
             }
 
-            const res = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${acc.broadcaster_id}`, {
+            const acc = db.accounts[db.active];
+            const res = await apiFetchWithRetry(`https://api.twitch.tv/helix/channels?broadcaster_id=${acc.broadcaster_id}`, {
                 method: 'PATCH',
-                headers: {
-                    'Client-ID': CLIENT_ID,
-                    'Authorization': `Bearer ${acc.access_token}`,
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ title, game_id: gameId, tags })
             });
 
-            if (res.status === 204) {
+            if (res && res.status === 204) {
                 alert('Stream updated successfully!');
-            } else {
+            } else if (res) {
                 const errText = await res.text();
                 alert(`Update failed: ${errText}`);
             }
